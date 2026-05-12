@@ -28,20 +28,21 @@ All repos and review context live under:
 ```
 ~/.openclaw/workspace/.review-context/<owner>-<repo>/
 ├── repo/                  ← persistent git clone
+├── prs/<number>.json      ← last reviewed head SHA, prior findings, dismissed findings
 ├── architecture.md        ← repo architecture notes (created/updated after reviews)
 ├── invariants.md          ← known invariants and contracts
 ├── risky-areas.md         ← historically buggy or complex areas
 └── review-history.md      ← past review findings and patterns
 ```
 
-Context files are optional. Create them only when stable knowledge is discovered during a review. Include them in subagent tasks when they exist.
+Context files are optional. Create them only when stable knowledge is discovered during a review. Include them in subagent tasks when they exist. PR state files are used to avoid repeating old findings on re-review.
 
 ## Workflow
 
 ### 1. Fetch PR metadata and diff
 
 ```bash
-gh pr view <PR> -R <owner/repo> --json title,body,baseRefName,headRefName,additions,deletions,changedFiles
+gh pr view <PR> -R <owner/repo> --json title,body,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,files
 gh pr diff <PR> -R <owner/repo>
 ```
 
@@ -68,31 +69,58 @@ gh pr checkout <N>
 
 If `gh pr checkout` fails, delete `$REVIEW_DIR/repo` and re-clone fresh.
 
-### 3. Detect docs-only PRs
+### 3. Load prior PR state and feedback memory
+
+If `$REVIEW_DIR/prs/<N>.json` exists, read it before reviewing. Use it to avoid repeated findings.
+
+Suggested state shape:
+
+```json
+{
+  "pr": 123,
+  "lastReviewedHeadSha": "abc123",
+  "reportedFindings": [],
+  "dismissedFindings": [],
+  "acceptedFindings": []
+}
+```
+
+If `lastReviewedHeadSha` exists and differs from the current `headRefOid`, treat this as a re-review: focus on `git diff <lastReviewedHeadSha>..<headRefOid>` and only carry forward old findings if they are still clearly unresolved.
+
+Also scan `review-history.md` for repeated false-positive patterns and project preferences. Suppress findings matching dismissed patterns unless there is new, stronger evidence.
+
+### 4. Detect docs-only PRs
 
 If all changed files are documentation/content only, skip subagents. Report "docs-only, no code concerns" and stop.
 
-### 4. Read existing repo context
+### 5. Read existing repo context
 
 Check `$REVIEW_DIR` for `architecture.md`, `invariants.md`, `risky-areas.md`, `review-history.md`. Read any that exist. Include their content in the subagent task prompts so reviewers have repo memory.
 
-### 5. Build the review context pack
+### 6. Build the review context pack
 
 Before spawning reviewers, prepare one compact context pack and pass the same pack to both subagents. Include:
 
 - PR title, body, base/head branch, additions/deletions, and changed file list
-- PR diff
+- PR diff, or incremental diff for re-reviews
 - Repo clone path (`$REVIEW_DIR/repo`)
 - Relevant existing repo context files
-- Any obvious risk signals: auth/security files, migrations, dependency files, CI/config files, public API/type/schema changes
+- Prior PR state: previous findings, dismissed findings, accepted findings
+- Full changed file contents, unless a file is huge/generated; for huge files, include enclosing functions/classes/sections only
+- Upstream dependency context: directly referenced functions, types, constants, configs, and likely callers/callees
+- Related tests and CODEOWNERS when present
+- PR delta brief: what this PR changes, where changed files fit in the architecture, affected execution flow, and design details that may look suspicious but are intentional
+- System constraints when relevant: timeout caps, output/body limits, concurrency limits, rate limits, memory limits, default parameter differences, fallback behavior
+- Risk signals: auth/security files, migrations, dependency files, CI/config files, public API/type/schema changes
+- Common false-positive patterns from repo memory plus these defaults: host vs container paths, idempotent safety nets, intentional fallthrough, best-effort error suppression, logging style inconsistencies, embedded shell/python in infrastructure code
 
-Keep the context pack focused. Do not paste unrelated files. Tell subagents to inspect the local repo when they need more context.
+Keep the context pack focused. Do not paste unrelated files. Tell subagents to inspect the local repo when they need more context. Context quality matters more than agent count.
 
-### 6. Spawn two subagent reviewers
+### 7. Spawn two subagent reviewers
 
 Read the task prompt from the corresponding reference file, then build the `task` string with:
 - Instructions from the reference file
-- The review context pack from step 5
+- The review context pack from step 6
 
 Use `context: "fork"` so each subagent inherits tools (`exec`, `read`, `grep`) and can explore the repo independently. Each subagent has its entire context window dedicated to one specialty.
 
@@ -101,9 +129,9 @@ Use `context: "fork"` so each subagent inherits tools (`exec`, `read`, `grep`) a
 
 Call `sessions_yield()` after spawning both.
 
-### 7. Merge, filter nits, and deduplicate
+### 8. Parent-agent validation, filtering, and deduplication
 
-Collect findings from both subagents. Apply three filters in order:
+Collect findings from both subagents. Never forward subagent findings directly. Subagents maximize recall; the parent reviewer maximizes precision with full repo context. Apply these filters in order:
 
 **Nit filter (drop first):** Remove any finding that is:
 - A style or naming preference
@@ -115,6 +143,10 @@ Collect findings from both subagents. Apply three filters in order:
 - Does it name an exact file and line?
 - Does it describe a concrete break path?
 - Does it include evidence from the diff or repo, not speculation?
+- Does it survive a second-pass check against the actual diff/repo?
+- Is it new, or still unresolved from a prior review?
+- Is the scenario realistic given the architecture brief, system constraints, and runtime behavior?
+- Is it contradicted by guards, fallbacks, idempotency, or trust-boundary context elsewhere in the repo?
 - Would a senior engineer agree it is worth flagging?
 
 Drop any finding that cannot be expressed with this schema:
@@ -129,13 +161,21 @@ Drop any finding that cannot be expressed with this schema:
 
 **Dedup:** Remove duplicates where both agents flagged the same issue. Rank by severity.
 
-### 8. Update repo context (only when new stable knowledge is discovered)
+**Output cap:** Report at most 5 findings by default. Include more only for Critical/High issues. Prefer a short high-signal report over a complete noisy report.
+
+### 9. Update repo context and PR state
 
 If the review revealed durable knowledge — architecture patterns, invariants, risky areas — update the corresponding files under `$REVIEW_DIR`. Append a brief entry to `review-history.md` with the PR number and key findings.
 
-Do not add PR-specific noise. Only add knowledge that helps future reviews.
+Update `architecture.md` when the review discovers durable repo architecture knowledge: execution flow, subsystem boundaries, host/container/runtime boundaries, hard system constraints, integration points, or design decisions future reviewers may mistake for bugs.
 
-### 9. Report in chat
+Update `invariants.md` for durable contracts or rules. Update `risky-areas.md` for historically fragile code paths. Update `review-history.md` for PR-specific findings, accepted findings, dismissed findings, and false-positive patterns.
+
+Do not add PR-specific noise to `architecture.md`, `invariants.md`, or `risky-areas.md`. If unsure whether knowledge is durable, write it to `review-history.md` instead.
+
+Update `$REVIEW_DIR/prs/<N>.json` with the current `headRefOid`, reported findings, and any known accepted/dismissed findings. If the user later says a finding was wrong/noisy, record that as a dismissed finding so future reviews suppress similar noise.
+
+### 10. Report in chat
 
 ```
 ## PR Review: <title> (#<number>)
