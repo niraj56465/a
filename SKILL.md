@@ -28,21 +28,20 @@ All repos and review context live under:
 ```
 ~/.openclaw/workspace/.review-context/<owner>-<repo>/
 ├── repo/                  ← persistent git clone
-├── prs/<number>.json      ← last reviewed head SHA, prior findings, dismissed findings
 ├── architecture.md        ← repo architecture notes (created/updated after reviews)
 ├── invariants.md          ← known invariants and contracts
 ├── risky-areas.md         ← historically buggy or complex areas
 └── review-history.md      ← past review findings and patterns
 ```
 
-Context files are optional. Create them only when stable knowledge is discovered during a review. Include them in subagent tasks when they exist. PR state files are used to avoid repeating old findings on re-review.
+Context files are optional. Create them only when stable knowledge is discovered during a review. Include them in subagent tasks when they exist.
 
 ## Workflow
 
 ### 1. Fetch PR metadata and diff
 
 ```bash
-gh pr view <PR> -R <owner/repo> --json title,body,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,files
+gh pr view <PR> -R <owner/repo> --json title,body,baseRefName,headRefName,additions,deletions,changedFiles,files
 gh pr diff <PR> -R <owner/repo>
 ```
 
@@ -69,58 +68,37 @@ gh pr checkout <N>
 
 If `gh pr checkout` fails, delete `$REVIEW_DIR/repo` and re-clone fresh.
 
-### 3. Load prior PR state and feedback memory
-
-If `$REVIEW_DIR/prs/<N>.json` exists, read it before reviewing. Use it to avoid repeated findings.
-
-Suggested state shape:
-
-```json
-{
-  "pr": 123,
-  "lastReviewedHeadSha": "abc123",
-  "reportedFindings": [],
-  "dismissedFindings": [],
-  "acceptedFindings": []
-}
-```
-
-If `lastReviewedHeadSha` exists and differs from the current `headRefOid`, treat this as a re-review: focus on `git diff <lastReviewedHeadSha>..<headRefOid>` and only carry forward old findings if they are still clearly unresolved.
-
-Also scan `review-history.md` for repeated false-positive patterns and project preferences. Suppress findings matching dismissed patterns unless there is new, stronger evidence.
-
-### 4. Detect docs-only PRs
+### 3. Detect docs-only PRs
 
 If all changed files are documentation/content only, skip subagents. Report "docs-only, no code concerns" and stop.
 
-### 5. Read existing repo context
+### 4. Read existing repo context
 
-Check `$REVIEW_DIR` for `architecture.md`, `invariants.md`, `risky-areas.md`, `review-history.md`. Read any that exist. Include their content in the subagent task prompts so reviewers have repo memory.
+Check `$REVIEW_DIR` for `architecture.md`, `invariants.md`, `risky-areas.md`, `review-history.md`. Read any that exist. Include their content in the subagent task prompts so reviewers have repo memory. Scan `review-history.md` for repeated false-positive patterns and project preferences.
 
-### 6. Build the review context pack
+### 5. Build the review context pack
 
 Before spawning reviewers, prepare one compact context pack and pass the same pack to both subagents. Include:
 
 - PR title, body, base/head branch, additions/deletions, and changed file list
-- PR diff, or incremental diff for re-reviews
+- PR diff
 - Repo clone path (`$REVIEW_DIR/repo`)
 - Relevant existing repo context files
-- Prior PR state: previous findings, dismissed findings, accepted findings
 - Full changed file contents, unless a file is huge/generated; for huge files, include enclosing functions/classes/sections only
 - Upstream dependency context: directly referenced functions, types, constants, configs, and likely callers/callees
-- Related tests and CODEOWNERS when present
+- Related tests and CODEOWNERS when useful
 - PR delta brief: what this PR changes, where changed files fit in the architecture, affected execution flow, and design details that may look suspicious but are intentional
 - System constraints when relevant: timeout caps, output/body limits, concurrency limits, rate limits, memory limits, default parameter differences, fallback behavior
 - Risk signals: auth/security files, migrations, dependency files, CI/config files, public API/type/schema changes
-- Common false-positive patterns from repo memory plus these defaults: host vs container paths, idempotent safety nets, intentional fallthrough, best-effort error suppression, logging style inconsistencies, embedded shell/python in infrastructure code
+- Common false-positive patterns from repo memory plus these defaults: host vs container paths, idempotent safety nets, intentional fallthrough, best-effort setup errors
 
 Keep the context pack focused. Do not paste unrelated files. Tell subagents to inspect the local repo when they need more context. Context quality matters more than agent count.
 
-### 7. Spawn two subagent reviewers
+### 6. Spawn two subagent reviewers
 
 Read the task prompt from the corresponding reference file, then build the `task` string with:
 - Instructions from the reference file
-- The review context pack from step 6
+- The review context pack from step 5
 
 Use `context: "fork"` so each subagent inherits tools (`exec`, `read`, `grep`) and can explore the repo independently. Each subagent has its entire context window dedicated to one specialty.
 
@@ -129,7 +107,7 @@ Use `context: "fork"` so each subagent inherits tools (`exec`, `read`, `grep`) a
 
 Call `sessions_yield()` after spawning both.
 
-### 8. Parent-agent validation, filtering, and deduplication
+### 7. Parent-agent validation, filtering, and deduplication
 
 Collect findings from both subagents. Never forward subagent findings directly. Subagents maximize recall; the parent reviewer maximizes precision with full repo context. Apply these filters in order:
 
@@ -144,7 +122,6 @@ Collect findings from both subagents. Never forward subagent findings directly. 
 - Does it describe a concrete break path?
 - Does it include evidence from the diff or repo, not speculation?
 - Does it survive a second-pass check against the actual diff/repo?
-- Is it new, or still unresolved from a prior review?
 - Is the scenario realistic given the architecture brief, system constraints, and runtime behavior?
 - Is it contradicted by guards, fallbacks, idempotency, or trust-boundary context elsewhere in the repo?
 - Would a senior engineer agree it is worth flagging?
@@ -167,38 +144,13 @@ Drop any finding that cannot be expressed with this schema:
 
 Use these while filtering subagent output:
 
-**Severity**
-- Critical: security breach, data loss, production outage/crash. Requires concrete proof.
-- High: realistic incorrect behavior for normal users or common operations.
-- Medium: maintainability risk, unusual edge case, or plausible but conditional bug.
-- Low: minor issue worth noting only if it affects correctness or review clarity.
-- Drop: style-only, speculative, already handled, or not worth fixing before merge.
+- Severity: Critical=data loss/security/outage with proof; High=realistic incorrect behavior; Medium=conditional risk; Low=minor correctness/clarity; Drop=style/speculation/already handled.
+- Runtime check: what actually happens, who controls input, which path executes, do guards/fallbacks handle it, and is the scenario realistic?
+- Infra/backend constraints: timeouts, size limits, concurrency/rate/memory limits, default mismatches, and fallback behavior.
+- Common false positives: host/container paths, idempotent safety nets, intentional fallthrough, best-effort setup errors.
+- Include dismissed findings only when non-obvious or likely to be questioned.
 
-**Runtime verification**
-- What actually happens at runtime?
-- Who controls the input: trusted operator/config or untrusted user/API data?
-- Which exact path executes, including fallback paths?
-- Do guards, validation, idempotency, or try/catch already handle it?
-- Is the scenario realistic?
-
-**System constraint checks**
-- Timeout caps in wrappers, watchers, gateways, clients, or jobs
-- Output/body size limits and truncation behavior
-- Concurrency, rate, memory, and queue limits
-- Default parameter mismatches when replacing one function/path with another
-- Fallback behavior on script failure vs transport failure vs validation failure
-
-**Common false positives**
-- Host vs container path differences caused by bind mounts
-- Idempotent safety-net operations that intentionally run twice
-- Intentional fallthrough or boundary checks
-- Best-effort `|| true`, ignored setup errors, or non-critical empty catches
-- Logger style inconsistency without behavioral impact
-- Embedded shell/python in infrastructure code without concrete maintenance/runtime risk
-
-Include dismissed findings only when they were non-obvious or likely to be questioned.
-
-### 9. Update repo context and PR state
+### 8. Update repo context
 
 If the review revealed durable knowledge — architecture patterns, invariants, risky areas — update the corresponding files under `$REVIEW_DIR`. Append a brief entry to `review-history.md` with the PR number and key findings.
 
@@ -208,9 +160,7 @@ Update `invariants.md` for durable contracts or rules. Update `risky-areas.md` f
 
 Do not add PR-specific noise to `architecture.md`, `invariants.md`, or `risky-areas.md`. If unsure whether knowledge is durable, write it to `review-history.md` instead.
 
-Update `$REVIEW_DIR/prs/<N>.json` with the current `headRefOid`, reported findings, and any known accepted/dismissed findings. If the user later says a finding was wrong/noisy, record that as a dismissed finding so future reviews suppress similar noise.
-
-### 10. Report in chat
+### 9. Report in chat
 
 ```
 ## PR Review: <title> (#<number>)
