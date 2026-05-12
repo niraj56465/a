@@ -163,6 +163,41 @@ Drop any finding that cannot be expressed with this schema:
 
 **Output cap:** Report at most 5 findings by default. Include more only for Critical/High issues. Prefer a short high-signal report over a complete noisy report.
 
+## Calibration blocks
+
+Use these while filtering subagent output:
+
+**Severity**
+- Critical: security breach, data loss, production outage/crash. Requires concrete proof.
+- High: realistic incorrect behavior for normal users or common operations.
+- Medium: maintainability risk, unusual edge case, or plausible but conditional bug.
+- Low: minor issue worth noting only if it affects correctness or review clarity.
+- Drop: style-only, speculative, already handled, or not worth fixing before merge.
+
+**Runtime verification**
+- What actually happens at runtime?
+- Who controls the input: trusted operator/config or untrusted user/API data?
+- Which exact path executes, including fallback paths?
+- Do guards, validation, idempotency, or try/catch already handle it?
+- Is the scenario realistic?
+
+**System constraint checks**
+- Timeout caps in wrappers, watchers, gateways, clients, or jobs
+- Output/body size limits and truncation behavior
+- Concurrency, rate, memory, and queue limits
+- Default parameter mismatches when replacing one function/path with another
+- Fallback behavior on script failure vs transport failure vs validation failure
+
+**Common false positives**
+- Host vs container path differences caused by bind mounts
+- Idempotent safety-net operations that intentionally run twice
+- Intentional fallthrough or boundary checks
+- Best-effort `|| true`, ignored setup errors, or non-critical empty catches
+- Logger style inconsistency without behavioral impact
+- Embedded shell/python in infrastructure code without concrete maintenance/runtime risk
+
+Include dismissed findings only when they were non-obvious or likely to be questioned.
+
 ### 9. Update repo context and PR state
 
 If the review revealed durable knowledge — architecture patterns, invariants, risky areas — update the corresponding files under `$REVIEW_DIR`. Append a brief entry to `review-history.md` with the PR number and key findings.
