@@ -76,22 +76,32 @@ If all changed files are documentation/content only, skip subagents. Report "doc
 
 Check `$REVIEW_DIR` for `architecture.md`, `invariants.md`, `risky-areas.md`, `review-history.md`. Read any that exist. Include their content in the subagent task prompts so reviewers have repo memory.
 
-### 5. Spawn two subagent reviewers
+### 5. Build the review context pack
+
+Before spawning reviewers, prepare one compact context pack and pass the same pack to both subagents. Include:
+
+- PR title, body, base/head branch, additions/deletions, and changed file list
+- PR diff
+- Repo clone path (`$REVIEW_DIR/repo`)
+- Relevant existing repo context files
+- Any obvious risk signals: auth/security files, migrations, dependency files, CI/config files, public API/type/schema changes
+
+Keep the context pack focused. Do not paste unrelated files. Tell subagents to inspect the local repo when they need more context.
+
+### 6. Spawn two subagent reviewers
 
 Read the task prompt from the corresponding reference file, then build the `task` string with:
 - Instructions from the reference file
-- Repo clone path (`$REVIEW_DIR/repo`)
-- PR diff and changed file list
-- Any existing repo context files
+- The review context pack from step 5
 
 Use `context: "fork"` so each subagent inherits tools (`exec`, `read`, `grep`) and can explore the repo independently. Each subagent has its entire context window dedicated to one specialty.
 
-**Bug hunter** — read `references/bug-hunter-prompt.md`, append PR context, spawn.
-**Security + architecture** — read `references/security-arch-prompt.md`, append PR context, spawn.
+**Bug + contract reviewer** — read `references/bug-hunter-prompt.md`, append the context pack, spawn.
+**Security + production-risk reviewer** — read `references/security-arch-prompt.md`, append the context pack, spawn.
 
 Call `sessions_yield()` after spawning both.
 
-### 6. Merge, filter nits, and deduplicate
+### 7. Merge, filter nits, and deduplicate
 
 Collect findings from both subagents. Apply three filters in order:
 
@@ -104,17 +114,28 @@ Collect findings from both subagents. Apply three filters in order:
 **Verification filter:** For each remaining finding:
 - Does it name an exact file and line?
 - Does it describe a concrete break path?
+- Does it include evidence from the diff or repo, not speculation?
 - Would a senior engineer agree it is worth flagging?
+
+Drop any finding that cannot be expressed with this schema:
+
+```
+- [Severity] `file:line` — concise issue
+  Evidence: exact code/change that creates the problem
+  Break path: input/event → code path → failure/impact
+  Suggested fix: concrete fix direction
+  Confidence: High/Medium/Low
+```
 
 **Dedup:** Remove duplicates where both agents flagged the same issue. Rank by severity.
 
-### 7. Update repo context (only when new stable knowledge is discovered)
+### 8. Update repo context (only when new stable knowledge is discovered)
 
 If the review revealed durable knowledge — architecture patterns, invariants, risky areas — update the corresponding files under `$REVIEW_DIR`. Append a brief entry to `review-history.md` with the PR number and key findings.
 
 Do not add PR-specific noise. Only add knowledge that helps future reviews.
 
-### 8. Report in chat
+### 9. Report in chat
 
 ```
 ## PR Review: <title> (#<number>)
@@ -123,6 +144,10 @@ Do not add PR-specific noise. Only add knowledge that helps future reviews.
 
 ### Findings
 - [Critical/High/Medium/Low] `file:line` — what is wrong and why it breaks
+  Evidence: exact changed code or repo fact
+  Break path: concrete failure path
+  Suggested fix: concrete fix direction
+  Confidence: High/Medium/Low
 
 ### What's Good
 - (1-2 lines)
