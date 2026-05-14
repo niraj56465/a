@@ -2,39 +2,28 @@
 name: codex-code-review-openclaw
 description: >
   Review GitHub pull requests using specialized subagents for high accuracy
-  and minimal false positives. Spawn parallel reviewers (bug hunter + security/architecture)
+  and minimal false positives. Spawn parallel reviewers (bug + contract and security + production-risk)
   that each trace code paths beyond the diff, then merge findings into one report.
   Report in chat only — never push to GitHub or post GitHub comments.
   Use when asked to review a PR, pull request, code change, or diff.
-version: 4.0.0
-metadata:
-  openclaw:
-    emoji: "🔍"
-    requires:
-      bins:
-        - gh
-        - git
-        - grep
 ---
 
 # PR Code Review
 
 Orchestrate two specialized subagent reviewers in parallel, merge their findings, report in chat.
 
-## Local repo and context storage
+## Requirements
+
+- `gh`, `git`, `grep`
+
+## Local repo + review memory
 
 All repos and review context live under:
 
-```
-~/.openclaw/workspace/.review-context/<owner>-<repo>/
-├── repo/                  ← persistent git clone
-├── architecture.md        ← repo architecture notes (created/updated after reviews)
-├── invariants.md          ← known invariants and contracts
-├── risky-areas.md         ← historically buggy or complex areas
-└── review-history.md      ← past review findings and patterns
-```
+`~/.openclaw/workspace/.review-context/<owner>-<repo>/`
 
-Context files are optional. Create them only when stable knowledge is discovered during a review. Include them in subagent tasks when they exist.
+- `repo/` (persistent clone)
+- `architecture.md`, `invariants.md`, `risky-areas.md`, `review-history.md` (optional “repo memory”; update only with durable knowledge)
 
 ## Workflow
 
@@ -49,20 +38,17 @@ gh pr diff <PR> -R <owner/repo>
 
 Set `REVIEW_DIR=~/.openclaw/workspace/.review-context/<owner>-<repo>`.
 
-**First time (no clone exists):**
 ```bash
 mkdir -p $REVIEW_DIR
-gh repo clone <owner/repo> $REVIEW_DIR/repo -- --depth=50
-cd $REVIEW_DIR/repo
-gh pr checkout <N>
-```
 
-**Subsequent reviews (clone exists):**
-```bash
+# clone once (or reclone if checkout fails)
+if [ ! -d "$REVIEW_DIR/repo/.git" ]; then
+  gh repo clone <owner/repo> $REVIEW_DIR/repo -- --depth=50
+fi
+
 cd $REVIEW_DIR/repo
-git checkout main
-git clean -fd
 git fetch origin
+git clean -fd
 gh pr checkout <N>
 ```
 
@@ -156,7 +142,7 @@ If the review revealed durable knowledge — architecture patterns, invariants, 
 
 Update `architecture.md` when the review discovers durable repo architecture knowledge: execution flow, subsystem boundaries, host/container/runtime boundaries, hard system constraints, integration points, or design decisions future reviewers may mistake for bugs.
 
-Update `invariants.md` for durable contracts or rules. Update `risky-areas.md` for historically fragile code paths. Update `review-history.md` for PR-specific findings, accepted findings, dismissed findings, and false-positive patterns.
+Update `invariants.md` for durable contracts or rules. Update `risky-areas.md` for historically fragile code paths. Update `review-history.md` for durable lessons, false-positive patterns, and brief PR review summaries.
 
 Do not add PR-specific noise to `architecture.md`, `invariants.md`, or `risky-areas.md`. If unsure whether knowledge is durable, write it to `review-history.md` instead.
 
@@ -187,13 +173,13 @@ If no real issues survive the merge: "No issues found. APPROVE."
 
 - Never push commits, branches, or any content to GitHub.
 - Never post PR reviews, comments, or reactions on GitHub.
-- Never modify files inside the cloned repo.
+- Never edit source files, create commits, or push changes inside the cloned repo.
 - Repo context files live in `$REVIEW_DIR`, never inside the repo.
 - Report only in chat.
 - Zero false positives over catching everything.
 
 ## References
 
-- `references/bug-hunter-prompt.md` — task prompt for the bug hunter subagent
-- `references/security-arch-prompt.md` — task prompt for the security/architecture subagent
+- `references/bug-hunter-prompt.md` — task prompt for the bug + contract reviewer
+- `references/security-arch-prompt.md` — task prompt for the security + production-risk reviewer
 - `references/examples.md` — concrete good vs bad finding examples
